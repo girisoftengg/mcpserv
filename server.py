@@ -1,4 +1,6 @@
 from fastmcp import FastMCP
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 mcp = FastMCP(
     name="Arithmetic MCP Server",
@@ -44,6 +46,11 @@ def modulo(a: float, b: float) -> float:
 def power(base: float, exponent: float) -> float:
     """Raise base to the power of exponent and return the result."""
     return base ** exponent
+
+
+@mcp.custom_route("/health", methods=["GET"])
+async def health(request: Request) -> JSONResponse:
+    return JSONResponse({"status": "ok", "service": "arithmetic-mcp"})
 
 
 if __name__ == "__main__":
