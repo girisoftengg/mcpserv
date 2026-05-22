@@ -11,8 +11,8 @@ WORKDIR /app
 # Copy lock files first for optimal layer caching
 COPY pyproject.toml uv.lock ./
 
-# Install all production dependencies into a local .venv
-RUN uv sync --frozen --no-dev --no-install-project
+# Install all production dependencies into a local .venv (without cache to prevent permission issues)
+RUN uv sync --frozen --no-dev --no-install-project --no-cache-dir
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Stage 2: runtime image
@@ -36,6 +36,7 @@ COPY server.py main.py pyproject.toml uv.lock ./
 # Put the venv on PATH so `python` / installed scripts resolve correctly
 ENV PATH="/app/.venv/bin:$PATH" \
     UV_PROJECT_ENVIRONMENT="/app/.venv" \
+    UV_CACHE_DIR="/tmp/.uv-cache" \
     # Switch transport to streamable-http for container/ECS use
     MCP_TRANSPORT="streamable-http" \
     HOST="0.0.0.0" \
