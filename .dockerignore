@@ -1,0 +1,36 @@
+# Version control
+.git/
+.gitignore
+*.md
+
+# Python artefacts
+__pycache__/
+*.py[oc]
+*.egg-info/
+dist/
+build/
+wheels/
+
+# Local virtual environment
+.venv/
+
+# Editor / IDE
+.vscode/
+*.idea/
+
+# OS artefacts
+.DS_Store
+Thumbs.db
+
+# Test / CI files
+tests/
+.pytest_cache/
+.coverage
+htmlcov/
+*.log
+
+# AWS infra source (not needed inside the image)
+aws/
+
+# Python version pin (managed by pyproject.toml inside)
+.python-version

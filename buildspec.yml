@@ -1,0 +1,67 @@
+version: 0.2
+
+# Environment variables injected by CodePipeline / CodeBuild environment
+# ECR_REGISTRY  - e.g. 123456789012.dkr.ecr.us-east-1.amazonaws.com
+# ECR_REPOSITORY - e.g. arithmetic-mcp
+# AWS_DEFAULT_REGION - set automatically by CodeBuild
+# CONTAINER_NAME - must match the container name in the ECS Task Definition
+
+env:
+  variables:
+    CONTAINER_NAME: "arithmetic-mcp"
+    DOCKER_BUILDKIT: "1"
+
+phases:
+  install:
+    runtime-versions:
+      python: 3.10
+    commands:
+      - echo "=== Install phase ==="
+      - pip install --quiet --upgrade pip
+
+  pre_build:
+    commands:
+      - echo "=== Pre-build phase: $(date) ==="
+      # Derive a short commit tag; fall back to 'latest'
+      - COMMIT_HASH=$(echo "$CODEBUILD_RESOLVED_SOURCE_VERSION" | cut -c 1-8)
+      - IMAGE_TAG="${COMMIT_HASH:-latest}"
+      - echo "Image tag -> $IMAGE_TAG"
+      # ECR login
+      - echo "Authenticating to ECR $ECR_REGISTRY"
+      - aws ecr get-login-password --region "$AWS_DEFAULT_REGION" \
+          | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+
+  build:
+    commands:
+      - echo "=== Build phase: $(date) ==="
+      - echo "Building $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+      - docker build
+          --cache-from "$ECR_REGISTRY/$ECR_REPOSITORY:latest"
+          --build-arg BUILDKIT_INLINE_CACHE=1
+          -t "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          -t "$ECR_REGISTRY/$ECR_REPOSITORY:latest"
+          .
+
+  post_build:
+    commands:
+      - echo "=== Post-build phase: $(date) ==="
+      - echo "Pushing $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+      - docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+      - docker push "$ECR_REGISTRY/$ECR_REPOSITORY:latest"
+      # imagedefinitions.json is consumed by the ECS rolling-update deploy action
+      - printf '[{"name":"%s","imageUri":"%s"}]' \
+          "$CONTAINER_NAME" \
+          "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" \
+          > imagedefinitions.json
+      - echo "=== imagedefinitions.json ==="
+      - cat imagedefinitions.json
+
+artifacts:
+  files:
+    - imagedefinitions.json
+  discard-paths: yes
+
+cache:
+  paths:
+    # Cache Docker layer tarballs in CodeBuild managed cache
+    - "/root/.docker/**/*"

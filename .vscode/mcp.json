@@ -1,0 +1,14 @@
+{
+	"servers": {
+		"arithmetic-mcp": {
+			"type": "stdio",
+			"command": "uv",
+			"args": [
+				"run",
+				"python",
+				"server.py"
+			]
+		}
+	},
+	"inputs": []
+}

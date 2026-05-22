@@ -1,0 +1,30 @@
+[
+  {
+    "ParameterKey": "EnvironmentName",
+    "ParameterValue": "prod"
+  },
+  {
+    "ParameterKey": "GitHubOwner",
+    "ParameterValue": "your-github-username"
+  },
+  {
+    "ParameterKey": "GitHubRepository",
+    "ParameterValue": "arithmetic-mcp"
+  },
+  {
+    "ParameterKey": "GitHubBranch",
+    "ParameterValue": "main"
+  },
+  {
+    "ParameterKey": "ECRRepositoryName",
+    "ParameterValue": "arithmetic-mcp"
+  },
+  {
+    "ParameterKey": "ECSClusterName",
+    "ParameterValue": "prod-mcp-cluster"
+  },
+  {
+    "ParameterKey": "ECSServiceName",
+    "ParameterValue": "prod-arithmetic-mcp-svc"
+  }
+]
