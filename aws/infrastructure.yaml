@@ -345,10 +345,10 @@ Resources:
       TargetType: ip           # required for Fargate
       HealthCheckProtocol: HTTP
       HealthCheckPort: !Sub "${ContainerPort}"
-      HealthCheckPath: /mcp
-      # FastMCP responds with 4xx to a plain GET on /mcp — treat as healthy
+      HealthCheckPath: /healthcheck
+      # Returns 200 OK with {"status":"ok","service":"arithmetic-mcp"}
       Matcher:
-        HttpCode: "200-405"
+        HttpCode: "200"
       HealthCheckIntervalSeconds: 30
       HealthCheckTimeoutSeconds: 10
       HealthyThresholdCount: 2

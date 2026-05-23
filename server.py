@@ -48,7 +48,7 @@ def power(base: float, exponent: float) -> float:
     return base ** exponent
 
 
-@mcp.custom_route("/health", methods=["GET"])
+@mcp.custom_route("/healthcheck", methods=["GET"])
 async def health(request: Request) -> JSONResponse:
     return JSONResponse({"status": "ok", "service": "arithmetic-mcp"})
 

@@ -1,0 +1,205 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# GitHub Actions — Build & Deploy to AWS ECS Fargate
+#
+# Trigger  : push to main branch  OR  manual workflow_dispatch
+# Strategy : OIDC (no long-lived AWS keys) → build → ECR push → ECS rolling deploy
+#
+# GitHub Secrets required:
+#   AWS_ACCOUNT_ID          — 12-digit AWS account ID  (e.g. 123456789012)
+#   AWS_REGION              — e.g. us-east-1
+#
+# GitHub Variables (Settings → Variables → Actions):
+#   None required — all env values are hardcoded below or derived from secrets
+#
+# IAM Role required (one-time setup — see GITHUB_DEPLOY_SETUP.md):
+#   arn:aws:iam::<ACCOUNT_ID>:role/github-actions-deploy-role
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: Deploy to AWS ECS
+
+on:
+  push:
+    branches:
+      - main                    # auto-deploy every push to main
+  workflow_dispatch:            # allow manual trigger from GitHub UI
+    inputs:
+      force_deploy:
+        description: 'Force deploy even if no code changes'
+        required: false
+        default: 'false'
+        type: boolean
+
+# Cancel in-flight deployments when a new push arrives on the same branch.
+# Prevents two simultaneous ECS deploys racing each other.
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  AWS_REGION:               us-east-1
+  ECR_REPOSITORY:           arithmetic-mcp
+  ECS_CLUSTER:              prod-mcp-cluster
+  ECS_SERVICE:              prod-arithmetic-mcp-svc
+  TASK_DEFINITION_FAMILY:   prod-arithmetic-mcp
+  CONTAINER_NAME:           arithmetic-mcp
+
+jobs:
+  # ───────────────────────────────────────────────────────────────────────────
+  # JOB 1 — Build Docker image and push to ECR
+  # ───────────────────────────────────────────────────────────────────────────
+  build:
+    name: Build & Push Image
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write   # required for OIDC token exchange with AWS
+      contents: read    # required to checkout code
+
+    outputs:
+      image: ${{ steps.build-image.outputs.image }}   # full ECR image URI passed to deploy job
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ── AWS Auth via OIDC (no long-lived keys) ──────────────────────────────
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-actions-deploy-role
+          aws-region: ${{ secrets.AWS_REGION || env.AWS_REGION }}
+          role-session-name: GitHubActions-${{ github.run_id }}
+
+      # ── ECR Login ───────────────────────────────────────────────────────────
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # ── Build & Push ────────────────────────────────────────────────────────
+      # Image tagged with both:
+      #   :sha-<git-sha>   — immutable, traceable to exact commit
+      #   :latest          — convenience tag (same image, same push)
+      # Never deploy :latest alone — the SHA tag is the audit trail.
+      - name: Build, tag, and push Docker image to ECR
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: sha-${{ github.sha }}
+        run: |
+          echo "Building image: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+          docker build \
+            --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --build-arg GIT_SHA="${{ github.sha }}" \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:latest \
+            .
+
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+          echo "Pushed: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # JOB 2 — Update task definition and deploy to ECS
+  # ───────────────────────────────────────────────────────────────────────────
+  deploy:
+    name: Deploy to ECS
+    runs-on: ubuntu-latest
+    needs: build                # wait for build job to complete
+
+    permissions:
+      id-token: write
+      contents: read
+
+    # Deployment environment — configure protection rules, required reviewers,
+    # and secrets per-environment in GitHub Settings → Environments
+    environment:
+      name: production
+      url: http://prod-mcp-alb-822248219.us-east-1.elb.amazonaws.com/healthcheck
+
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-actions-deploy-role
+          aws-region: ${{ secrets.AWS_REGION || env.AWS_REGION }}
+          role-session-name: GitHubActions-Deploy-${{ github.run_id }}
+
+      # ── Enable Circuit Breaker (idempotent — safe to run on every deploy) ────
+      # Circuit breaker: if new tasks fail health checks, ECS automatically
+      # reverts the service to the previous stable task definition revision.
+      # Without this, a bad deploy leaves the service stuck with 0 healthy tasks.
+      - name: Ensure ECS circuit breaker is enabled (with rollback)
+        run: |
+          aws ecs update-service \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --service ${{ env.ECS_SERVICE }} \
+            --deployment-configuration \
+              "deploymentCircuitBreaker={enable=true,rollback=true},minimumHealthyPercent=50,maximumPercent=200" \
+            --region ${{ secrets.AWS_REGION || env.AWS_REGION }} \
+            --no-force-new-deployment > /dev/null
+          echo "Circuit breaker: ENABLED with automatic rollback"
+
+      # ── Fetch current task definition from AWS ──────────────────────────────
+      # Downloads the LIVE task definition — this is the source of truth.
+      # We do NOT store task definitions in git (they contain account IDs and
+      # environment-specific values that change per deploy).
+      - name: Download current task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition ${{ env.TASK_DEFINITION_FAMILY }} \
+            --query taskDefinition \
+            --output json > task-definition.json
+
+          echo "Current task definition revision:"
+          cat task-definition.json | python3 -c "import sys,json; td=json.load(sys.stdin); print(f'  Family: {td[\"family\"]}  |  Revision: {td[\"revision\"]}  |  Image: {td[\"containerDefinitions\"][0][\"image\"]}')"
+
+      # ── Render new task definition with updated image ───────────────────────
+      # Replaces ONLY the container image URI. All other settings (env vars,
+      # CPU, memory, log config, health check) remain as-is from the live task def.
+      - name: Render new task definition with updated image
+        id: task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name: ${{ env.CONTAINER_NAME }}
+          image: ${{ needs.build.outputs.image }}
+
+      # ── Register new revision & deploy ─────────────────────────────────────
+      # This action:
+      #   1. Calls register-task-definition (creates a new revision)
+      #   2. Calls update-service with the new revision
+      #   3. Waits (up to wait-for-minutes) for the service to reach steady state
+      #      (all new tasks healthy, all old tasks drained and stopped)
+      # If health checks fail → deploy stalls; old tasks keep running.
+      - name: Deploy new task definition to ECS
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.task-def.outputs.task-definition }}
+          service: ${{ env.ECS_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
+          wait-for-minutes: 10      # ECS rolling deploy typically finishes in 3-5 min
+
+      # ── Smoke test ──────────────────────────────────────────────────────────
+      - name: Smoke test — verify health endpoint
+        run: |
+          ALB_URL="http://prod-mcp-alb-822248219.us-east-1.elb.amazonaws.com"
+
+          echo "Waiting 15s for ALB to finish routing to new tasks..."
+          sleep 15
+
+          echo "Calling /healthcheck..."
+          RESPONSE=$(curl -sf --max-time 10 "$ALB_URL/healthcheck")
+          echo "Response: $RESPONSE"
+
+          # Verify the response contains expected fields
+          echo "$RESPONSE" | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          assert data.get('status') == 'ok', f'Expected status=ok, got: {data}'
+          assert data.get('service') == 'arithmetic-mcp', f'Expected service=arithmetic-mcp, got: {data}'
+          print('Health check PASSED')
+          "
