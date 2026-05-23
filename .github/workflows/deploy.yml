@@ -1,18 +1,15 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # GitHub Actions — Build & Deploy to AWS ECS Fargate
 #
-# Trigger  : push to main branch  OR  manual workflow_dispatch
-# Strategy : OIDC (no long-lived AWS keys) → build → ECR push → ECS rolling deploy
+# Trigger  : push to main branch
+# Strategy : AWS access keys → build → ECR push → ECS rolling deploy
 #
 # GitHub Secrets required:
-#   AWS_ACCOUNT_ID          — 12-digit AWS account ID  (e.g. 123456789012)
-#   AWS_REGION              — e.g. us-east-1
+#   AWS_ACCESS_KEY_ID       — IAM user access key ID
+#   AWS_SECRET_ACCESS_KEY   — IAM user secret access key
 #
 # GitHub Variables (Settings → Variables → Actions):
-#   None required — all env values are hardcoded below or derived from secrets
-#
-# IAM Role required (one-time setup — see GITHUB_DEPLOY_SETUP.md):
-#   arn:aws:iam::<ACCOUNT_ID>:role/github-actions-deploy-role
+#   None required — all env values are hardcoded below
 # ─────────────────────────────────────────────────────────────────────────────
 
 name: Deploy to AWS ECS
@@ -21,14 +18,7 @@ on:
   push:
     branches:
       - main                    # auto-deploy every push to main
-  workflow_dispatch:            # allow manual trigger from GitHub UI
-    inputs:
-      force_deploy:
-        description: 'Force deploy even if no code changes'
-        required: false
-        default: 'false'
-        type: boolean
-
+  
 # Cancel in-flight deployments when a new push arrives on the same branch.
 # Prevents two simultaneous ECS deploys racing each other.
 concurrency:
@@ -52,7 +42,6 @@ jobs:
     runs-on: ubuntu-latest
 
     permissions:
-      id-token: write   # required for OIDC token exchange with AWS
       contents: read    # required to checkout code
 
     outputs:
@@ -62,13 +51,13 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # ── AWS Auth via OIDC (no long-lived keys) ──────────────────────────────
-      - name: Configure AWS credentials (OIDC)
+      # ── AWS Auth via access keys ────────────────────────────────────────────
+      - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-actions-deploy-role
-          aws-region: ${{ secrets.AWS_REGION || env.AWS_REGION }}
-          role-session-name: GitHubActions-${{ github.run_id }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
 
       # ── ECR Login ───────────────────────────────────────────────────────────
       - name: Login to Amazon ECR
@@ -110,7 +99,6 @@ jobs:
     needs: build                # wait for build job to complete
 
     permissions:
-      id-token: write
       contents: read
 
     # Deployment environment — configure protection rules, required reviewers,
@@ -120,12 +108,12 @@ jobs:
       url: http://prod-mcp-alb-822248219.us-east-1.elb.amazonaws.com/healthcheck
 
     steps:
-      - name: Configure AWS credentials (OIDC)
+      - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-actions-deploy-role
-          aws-region: ${{ secrets.AWS_REGION || env.AWS_REGION }}
-          role-session-name: GitHubActions-Deploy-${{ github.run_id }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
 
       # ── Enable Circuit Breaker (idempotent — safe to run on every deploy) ────
       # Circuit breaker: if new tasks fail health checks, ECS automatically
@@ -138,7 +126,7 @@ jobs:
             --service ${{ env.ECS_SERVICE }} \
             --deployment-configuration \
               "deploymentCircuitBreaker={enable=true,rollback=true},minimumHealthyPercent=50,maximumPercent=200" \
-            --region ${{ secrets.AWS_REGION || env.AWS_REGION }} \
+            --region ${{ env.AWS_REGION }} \
             --no-force-new-deployment > /dev/null
           echo "Circuit breaker: ENABLED with automatic rollback"
 
